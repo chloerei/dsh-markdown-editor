@@ -196,6 +196,75 @@ window.__ModuleLoader__.load({
     /** A table row line. */
     const TABLE_PATTERN = /^\s*\|.*\|\s*$/;
 
+    /* ── List input assistance ─────────────────────────────────────────── */
+
+    /** The opening of a list item: indentation, bullet or number, whitespace. */
+    const LIST_PREFIX_PATTERN = /^([ \t]*)([-*+]|\d+[.)])([ \t]+)/;
+
+    /** A line that holds nothing but a list marker, i.e. an empty item. */
+    const LIST_EMPTY_PATTERN = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]*$/;
+
+    /**
+     * Build the marker that continues a list item.
+     * @param line - the line text before the caret.
+     * @returns the prefix for the next item, or undefined when the line opens none.
+     */
+    function listPrefix(line) {
+      if (RULE_PATTERN.test(line)) return undefined;
+      const match = LIST_PREFIX_PATTERN.exec(line);
+      if (match === null) return undefined;
+      const marker = match[2];
+      if (!/^\d/.test(marker)) return match[0];
+      const digits = marker.slice(0, -1);
+      const next = Number.parseInt(digits, 10) + 1;
+      if (!Number.isSafeInteger(next)) return match[0];
+      return match[1] + String(next).padStart(digits.length, '0') + marker.slice(-1) + match[3];
+    }
+
+    /**
+     * Whether an open fenced code block contains the line at the given offset.
+     * @param text - the whole draft.
+     * @param offset - a caret offset in the draft.
+     * @returns whether that line sits inside a fence.
+     */
+    function fencedAt(text, offset) {
+      const target = text.lastIndexOf('\n', offset - 1) + 1;
+      let fence = '';
+      for (const line of text.slice(0, target).split('\n')) {
+        const head = FENCE_PATTERN.exec(line);
+        if (fence === '') {
+          if (head !== null) fence = head[1];
+        } else if (head !== null && head[1][0] === fence[0] && head[1].length >= fence.length) {
+          fence = '';
+        }
+      }
+      return fence !== '';
+    }
+
+    /**
+     * Apply list input assistance to one Enter press: repeat an unordered
+     * marker, advance an ordered one, and end the list on an empty item.
+     * @param text - the whole draft.
+     * @param start - selection start; continuation needs a collapsed caret.
+     * @param end - selection end.
+     * @returns the next draft and caret offset, or undefined to let Enter pass.
+     */
+    function continueList(text, start, end) {
+      if (start !== end) return undefined;
+      if (fencedAt(text, start)) return undefined;
+      const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+      const prefix = listPrefix(text.slice(lineStart, start));
+      if (prefix === undefined) return undefined;
+      const lineEnd = text.indexOf('\n', start);
+      const stop = lineEnd === -1 ? text.length : lineEnd;
+      if (LIST_EMPTY_PATTERN.test(text.slice(lineStart, stop))) {
+        // Enter on an empty item ends the list: drop the marker in place.
+        return { text: text.slice(0, lineStart) + text.slice(stop), caret: lineStart };
+      }
+      const insert = '\n' + prefix;
+      return { text: text.slice(0, start) + insert + text.slice(end), caret: start + insert.length };
+    }
+
     /**
      * Tokenize one line's inline Markdown.
      * @param line - the line's text.
@@ -517,11 +586,33 @@ window.__ModuleLoader__.load({
         setState((prev) => ({ ...prev, draft: value }));
       }
 
-      /** @param event - textarea keydown; Ctrl/⌘+S saves and Tab indents. */
+      /** @param event - textarea keydown; Ctrl/⌘+S saves, Enter continues a list, and Tab indents. */
       function onKeyDown(event) {
         if ((event.metaKey || event.ctrlKey) && !event.altKey && (event.key === 's' || event.key === 'S')) {
           event.preventDefault();
           if (state.draft !== state.saved) save(false);
+          return;
+        }
+        if (
+          event.key === 'Enter' &&
+          !event.shiftKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !state.composing &&
+          event.isComposing !== true &&
+          event.keyCode !== 229
+        ) {
+          const element = event.currentTarget;
+          const edit = continueList(state.draft, element.selectionStart, element.selectionEnd);
+          if (edit !== undefined) {
+            event.preventDefault();
+            setState((prev) => ({ ...prev, draft: edit.text }));
+            requestAnimationFrame(() => {
+              element.selectionStart = edit.caret;
+              element.selectionEnd = edit.caret;
+            });
+          }
           return;
         }
         if (event.key === 'Tab' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {

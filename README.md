@@ -56,6 +56,16 @@ backdrop never changes what is stored or saved.
   width, `scrollbar-width: thin`), and the backdrop's own thumb is transparent,
   so exactly one scrollbar is visible and wrap points still line up.
 
+## List input assistance
+
+`Enter` inside a list item continues the list. An unordered marker repeats
+verbatim, keeping its indentation and the spacing after the marker; an ordered
+number advances and keeps its delimiter, so `1.` → `2.`, `9)` → `10)`, and a
+zero-padded `01.` → `02.`. Pressing `Enter` on an item that holds nothing but a
+marker ends the list by dropping that marker. `Shift+Enter`, a held modifier, an
+active IME composition, a non-empty selection, and any line already inside a
+fenced code block all insert a plain newline instead.
+
 ## Files
 
 | File | Role |
