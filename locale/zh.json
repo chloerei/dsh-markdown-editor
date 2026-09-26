@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Markdown 编辑器",
+    "description": "在右侧边栏打开 Markdown 文件时直接编辑，并保存回磁盘。"
+  }
+}

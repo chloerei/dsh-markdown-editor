@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Markdown editor">
+  <path fill="#247bbf" d="M4 3.5h10.5L20 9v11.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" opacity=".18"/>
+  <path fill="none" stroke="#247bbf" stroke-width="1.4" stroke-linejoin="round" d="M4.7 4.2h9.6L19.3 9v10.8H4.7z"/>
+  <path fill="none" stroke="#247bbf" stroke-width="1.4" stroke-linecap="round" d="M14.3 4.2V9h5"/>
+  <path fill="none" stroke="#247bbf" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M7.6 16.4v-4.2l2.1 2.4 2.1-2.4v4.2"/>
+  <path fill="none" stroke="#247bbf" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M15.6 12.2v4.2m0 0 1.6-1.7m-1.6 1.7-1.6-1.7"/>
+</svg>
