@@ -2,9 +2,13 @@
  * Client half of the Markdown editor bundle.
  *
  * Registers a document implementation for Markdown suffixes that loads the
- * complete file and edits it in a plain textarea. Saving posts the text to the
- * Host half's route; the builtin Markdown preview stays selectable from the
- * document's own viewer dropdown.
+ * complete file and edits it in a textarea. Highlighting is drawn by a
+ * backdrop `<pre>` under a transparent-text textarea: the two share every box
+ * metric and scroll together, and the token colors come from the application's
+ * own `--shiki-*` sheet, so light and dark themes need no extra rules.
+ *
+ * Saving posts the text to the Host half's route; the builtin Markdown preview
+ * stays selectable from the document's own viewer dropdown.
  */
 
 window.__ModuleLoader__.load({
@@ -21,6 +25,10 @@ window.__ModuleLoader__.load({
     const SAVE_ROUTE = '/api/dsh-markdown-editor/save';
     /** Client locale namespace of this bundle's copy. */
     const NS = 'markdownEditor';
+    /** Source length above which the backdrop drops token colors but keeps the text. */
+    const HIGHLIGHT_LIMIT = 120000;
+    /** Bound on the retained per-line token cache. */
+    const LINE_CACHE_LIMIT = 4000;
 
     const zh = {
       'viewer.editor': 'Markdown 编辑器',
@@ -79,14 +87,48 @@ window.__ModuleLoader__.load({
       '.dsh-markdown-editor-notice{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap;padding:6px 10px;background:var(--dsw-alias-bg-layer-2);border-bottom:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);font-size:12px;white-space:normal;}',
       '.dsh-markdown-editor-note{margin:0;padding:10px 12px;color:var(--dsw-alias-label-secondary);font-size:12px;white-space:normal;}',
       '.dsh-markdown-editor-error{margin:0;padding:6px 10px;border-bottom:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-state-error-primary);font-size:12px;white-space:normal;}',
-      '.dsh-markdown-editor-input{box-sizing:border-box;flex:1 1 auto;min-height:12rem;margin:0;padding:10px 12px;border:0;outline:none;resize:none;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-brand-primary);font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.6;tab-size:2;white-space:pre;overflow:auto;}',
-      '.dsh-markdown-editor-input[data-wrap="true"]{white-space:pre-wrap;word-break:break-word;}',
+      '.dsh-markdown-editor-surface{position:relative;flex:1 1 auto;min-height:12rem;overflow:hidden;}',
+      '.dsh-markdown-editor-highlight,.dsh-markdown-editor-input{position:absolute;inset:0;box-sizing:border-box;margin:0;padding:10px 12px;border:0;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.6;tab-size:2;white-space:pre;overflow:auto;scrollbar-gutter:stable;scrollbar-width:thin;}',
+      '.dsh-markdown-editor-highlight{scrollbar-color:transparent transparent;}',
+      '.dsh-markdown-editor-input{scrollbar-color:var(--dsh-scrollbar-thumb,var(--dsw-alias-scrollbar-bg-l2,rgba(128,128,128,.4))) transparent;}',
+      '.dsh-markdown-editor-highlight::-webkit-scrollbar,.dsh-markdown-editor-input::-webkit-scrollbar{width:10px;height:10px;}',
+      '.dsh-markdown-editor-highlight::-webkit-scrollbar-thumb,.dsh-markdown-editor-highlight::-webkit-scrollbar-track,.dsh-markdown-editor-highlight::-webkit-scrollbar-corner{background:transparent;}',
+      '.dsh-markdown-editor-input::-webkit-scrollbar-track{background:transparent;margin:2px;}',
+      '.dsh-markdown-editor-input::-webkit-scrollbar-corner{background:transparent;}',
+      '.dsh-markdown-editor-input::-webkit-scrollbar-thumb{background:var(--dsh-scrollbar-thumb,var(--dsw-alias-scrollbar-bg-l2,rgba(128,128,128,.4)));border-radius:5px;}',
+      '.dsh-markdown-editor-input::-webkit-scrollbar-thumb:hover{background:var(--dsh-scrollbar-thumb-hover,var(--dsw-alias-scrollbar-hover-l2,rgba(128,128,128,.6)));}',
+      '.dsh-markdown-editor-highlight{pointer-events:none;z-index:0;color:var(--shiki-foreground,var(--dsw-alias-label-primary));background:transparent;}',
+      '.dsh-markdown-editor-highlight code{font:inherit;background:none;padding:0;}',
+      '.dsh-markdown-editor-input{z-index:1;resize:none;outline:none;background:transparent;color:transparent;caret-color:var(--dsw-alias-label-primary);}',
+      '.dsh-markdown-editor-input::selection{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 30%,transparent);}',
+      '.dsh-markdown-editor[data-wrap="true"] .dsh-markdown-editor-highlight,.dsh-markdown-editor[data-wrap="true"] .dsh-markdown-editor-input{white-space:pre-wrap;overflow-wrap:anywhere;}',
+      '.dsh-markdown-editor[data-composing="true"] .dsh-markdown-editor-highlight{visibility:hidden;}',
+      '.dsh-markdown-editor[data-composing="true"] .dsh-markdown-editor-input{color:var(--dsw-alias-label-primary);}',
+      '.dsh-mdm-marker{color:var(--shiki-token-keyword);}',
+      '.dsh-mdm-fence{color:var(--shiki-token-keyword);}',
+      '.dsh-mdm-hr{color:var(--shiki-token-punctuation);}',
+      '.dsh-mdm-heading{color:var(--shiki-token-constant);font-weight:600;}',
+      '.dsh-mdm-strong{color:var(--shiki-token-function);font-weight:600;}',
+      '.dsh-mdm-em{color:var(--shiki-token-function);font-style:italic;}',
+      '.dsh-mdm-strike{color:var(--shiki-token-comment);text-decoration:line-through;}',
+      '.dsh-mdm-code{color:var(--shiki-token-string);}',
+      '.dsh-mdm-code-line{color:var(--shiki-token-string-expression);}',
+      '.dsh-mdm-quote{color:var(--shiki-token-comment);}',
+      '.dsh-mdm-table{color:var(--shiki-token-parameter);}',
+      '.dsh-mdm-link{color:var(--shiki-token-link);}',
+      '.dsh-mdm-image{color:var(--shiki-token-parameter);}',
+      '.dsh-mdm-url{color:var(--shiki-token-string-expression);}',
+      '.dsh-mdm-punct{color:var(--shiki-token-punctuation);}',
+      '.dsh-mdm-escape{color:var(--shiki-token-parameter);}',
+      '.dsh-mdm-comment{color:var(--shiki-token-comment);font-style:italic;}',
     ].join('');
 
     /** Bound translate of the active locale; replaced when the plugin applies. */
     let translate = (key) => key;
     /** Locale service, so an open editor re-renders on a locale switch. */
     let localeService;
+    /** Per-line token results keyed by `(in fence, line)`. */
+    const lineCache = new Map();
 
     /**
      * Decode complete file bytes as UTF-8.
@@ -127,8 +169,145 @@ window.__ModuleLoader__.load({
       }, []);
     }
 
+    /* ── Markdown tokenizing ───────────────────────────────────────────── */
+
+    /** Inline Markdown alternatives; the first matching alternative wins. */
+    const INLINE_PATTERN =
+      /(?<escape>\\[\\`*_{}\[\]()#+.!~>-])|(?<code>`+[^`\n]*?`+)|(?<strong>\*\*(?=[^\s*])[^*\n]*?[^\s*]\*\*|__(?=[^\s_])[^_\n]*?[^\s_]__)|(?<strike>~~(?=\S)[\s\S]*?\S~~)|(?<em>\*(?=[^\s*])[^*\n]*?[^\s*]\*|(?<![\w])_(?=[^\s_])[^_\n]*?[^\s_](?![\w])_)|(?<image>!\[[^\]\n]*\]\([^)\n]*\))|(?<link>\[[^\]\n]*\]\([^)\n]*\))|(?<autolink><(?:https?:\/\/|mailto:)[^>\s]*>)|(?<html><!--[\s\S]*?-->|<\/?[A-Za-z][^>\n]*>)/g;
+
+    /** Split one link or image match into its bang, label, and target parts. */
+    const LINK_PARTS = /^(!?)\[([^\]]*)\]\(([^)]*)\)$/;
+
+    /** Head of one fenced code block. */
+    const FENCE_PATTERN = /^\s{0,3}(`{3,}|~{3,})/;
+
+    /** A thematic break line. */
+    const RULE_PATTERN = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
+
+    /** An ATX heading line, with its trailing text when present. */
+    const HEADING_PATTERN = /^(#{1,6})(\s.*)?$/;
+
+    /** A blockquote line, with its content. */
+    const QUOTE_PATTERN = /^(\s*>+\s?)(.*)$/;
+
+    /** A list item line, with its marker and content. */
+    const LIST_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+)(.*)$/;
+
+    /** A table row line. */
+    const TABLE_PATTERN = /^\s*\|.*\|\s*$/;
+
     /**
-     * One open Markdown file as an editable textarea.
+     * Tokenize one line's inline Markdown.
+     * @param line - the line's text.
+     * @param base - class applied to text no token claims.
+     * @returns ordered `{ text, cls }` tokens.
+     */
+    function inlineTokens(line, base) {
+      const tokens = [];
+      if (line === '') return tokens;
+      INLINE_PATTERN.lastIndex = 0;
+      let last = 0;
+      let match;
+      while ((match = INLINE_PATTERN.exec(line)) !== null) {
+        if (match.index > last) tokens.push({ text: line.slice(last, match.index), cls: base });
+        const groups = match.groups || {};
+        if (groups.escape !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-escape' });
+        } else if (groups.code !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-code' });
+        } else if (groups.strong !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-strong' });
+        } else if (groups.strike !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-strike' });
+        } else if (groups.em !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-em' });
+        } else if (groups.image !== undefined || groups.link !== undefined) {
+          const parts = LINK_PARTS.exec(match[0]);
+          if (parts === null) {
+            tokens.push({ text: match[0], cls: 'dsh-mdm-link' });
+          } else {
+            if (parts[1] === '!') tokens.push({ text: '!', cls: 'dsh-mdm-punct' });
+            tokens.push({ text: '[', cls: 'dsh-mdm-punct' });
+            tokens.push({ text: parts[2], cls: parts[1] === '!' ? 'dsh-mdm-image' : 'dsh-mdm-link' });
+            tokens.push({ text: '](', cls: 'dsh-mdm-punct' });
+            tokens.push({ text: parts[3], cls: 'dsh-mdm-url' });
+            tokens.push({ text: ')', cls: 'dsh-mdm-punct' });
+          }
+        } else if (groups.autolink !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-link' });
+        } else if (groups.html !== undefined) {
+          tokens.push({ text: match[0], cls: 'dsh-mdm-comment' });
+        } else {
+          tokens.push({ text: match[0], cls: base });
+        }
+        last = match.index + match[0].length;
+      }
+      if (last < line.length) tokens.push({ text: line.slice(last), cls: base });
+      return tokens.filter((token) => token.text !== '');
+    }
+
+    /**
+     * Tokenize one line, using the block construct it sits in.
+     * @param line - the line's text.
+     * @param inFence - whether an open fenced code block contains this line.
+     * @returns ordered `{ text, cls }` tokens.
+     */
+    function classifyLine(line, inFence) {
+      const fence = FENCE_PATTERN.exec(line);
+      if (inFence) {
+        return fence === null ? [{ text: line, cls: 'dsh-mdm-code-line' }] : [{ text: line, cls: 'dsh-mdm-fence' }];
+      }
+      if (fence !== null) return [{ text: line, cls: 'dsh-mdm-fence' }];
+      if (RULE_PATTERN.test(line)) return [{ text: line, cls: 'dsh-mdm-hr' }];
+      if (/^\s*<!--/.test(line)) return [{ text: line, cls: 'dsh-mdm-comment' }];
+      const heading = HEADING_PATTERN.exec(line);
+      if (heading !== null) {
+        const tokens = [{ text: heading[1], cls: 'dsh-mdm-marker' }];
+        if (heading[2] !== undefined) tokens.push(...inlineTokens(heading[2], 'dsh-mdm-heading'));
+        return tokens;
+      }
+      const quote = QUOTE_PATTERN.exec(line);
+      if (quote !== null) {
+        return [{ text: quote[1], cls: 'dsh-mdm-marker' }, ...inlineTokens(quote[2], 'dsh-mdm-quote')];
+      }
+      const list = LIST_PATTERN.exec(line);
+      if (list !== null) return [{ text: list[1], cls: 'dsh-mdm-marker' }, ...inlineTokens(list[2], '')];
+      if (TABLE_PATTERN.test(line)) return [{ text: line, cls: 'dsh-mdm-table' }];
+      return inlineTokens(line, '');
+    }
+
+    /**
+     * Tokenize a whole document, one token array per line.
+     * @param text - the document text.
+     * @returns one ordered token array per source line.
+     */
+    function highlightLines(text) {
+      const lines = text.split('\n');
+      const result = [];
+      let fence = '';
+      for (const line of lines) {
+        const key = (fence === '' ? 't' : 'c') + '\u0000' + line;
+        let tokens = lineCache.get(key);
+        if (tokens === undefined) {
+          tokens = classifyLine(line, fence !== '');
+          if (lineCache.size >= LINE_CACHE_LIMIT) lineCache.clear();
+          lineCache.set(key, tokens);
+        }
+        result.push(tokens);
+        const head = FENCE_PATTERN.exec(line);
+        if (fence !== '') {
+          if (head !== null && head[1][0] === fence[0] && head[1].length >= fence.length) fence = '';
+        } else if (head !== null) {
+          fence = head[1];
+        }
+      }
+      return result;
+    }
+
+    /* ── The editor body ───────────────────────────────────────────────── */
+
+    /**
+     * One open Markdown file as a highlighted, editable textarea.
      * @param props - owner content plus the standard resource and tab hooks.
      * @returns the editor, or the reason it cannot show one.
      */
@@ -162,7 +341,24 @@ window.__ModuleLoader__.load({
         error: undefined,
         changed: false,
         conflict: undefined,
+        composing: false,
       }));
+
+      const areaRef = React.useRef(undefined);
+      const highlightRef = React.useRef(undefined);
+      const bindArea = React.useCallback(
+        (node) => {
+          areaRef.current = node;
+          if (typeof scrollportRef === 'function') scrollportRef(node);
+          else if (scrollportRef !== undefined && scrollportRef !== null) scrollportRef.current = node;
+        },
+        [scrollportRef],
+      );
+
+      const highlighted = React.useMemo(
+        () => (state.draft.length > HIGHLIGHT_LIMIT ? undefined : highlightLines(state.draft)),
+        [state.draft],
+      );
 
       React.useEffect(() => {
         if (!decoded || decoded.text === undefined) return;
@@ -186,6 +382,14 @@ window.__ModuleLoader__.load({
           return prev.changed ? prev : { ...prev, changed: true };
         });
       }, [decoded]);
+
+      React.useLayoutEffect(() => {
+        const area = areaRef.current;
+        const highlight = highlightRef.current;
+        if (!area || !highlight) return;
+        highlight.scrollTop = area.scrollTop;
+        highlight.scrollLeft = area.scrollLeft;
+      });
 
       /**
        * Send the current draft to the Host.
@@ -334,6 +538,25 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** @param event - textarea scroll; the backdrop follows it. */
+      function onScroll(event) {
+        const highlight = highlightRef.current;
+        if (!highlight) return;
+        highlight.scrollTop = event.currentTarget.scrollTop;
+        highlight.scrollLeft = event.currentTarget.scrollLeft;
+      }
+
+      /** Keep an IME composition legible: the textarea owns the text while it composes. */
+      function onCompositionStart() {
+        setState((prev) => (prev.composing ? prev : { ...prev, composing: true }));
+      }
+
+      /** @param event - composition end, carrying the committed textarea value. */
+      function onCompositionEnd(event) {
+        const value = event.target.value;
+        setState((prev) => ({ ...prev, composing: false, draft: value }));
+      }
+
       if (!decoded) {
         return h(
           'div',
@@ -449,22 +672,57 @@ window.__ModuleLoader__.load({
         ? h('p', { className: 'dsh-markdown-editor-error', key: 'error' }, state.error)
         : null;
 
-      const input = h('textarea', {
-        key: 'input',
-        className: 'dsh-markdown-editor-input',
-        ref: scrollportRef,
-        value: state.draft,
-        wrap: wrap === false ? 'off' : 'soft',
-        'data-wrap': wrap === false ? 'false' : 'true',
-        spellCheck: false,
-        autoCapitalize: 'off',
-        autoCorrect: 'off',
-        'aria-label': translate('viewer.editor'),
-        onChange: onChange,
-        onKeyDown: onKeyDown,
-      });
+      const backdrop =
+        highlighted === undefined
+          ? state.draft + '\n'
+          : highlighted.map((tokens, index) =>
+              h(
+                React.Fragment,
+                { key: index },
+                tokens.map((token, tokenIndex) => h('span', { key: tokenIndex, className: token.cls }, token.text)),
+                '\n',
+              ),
+            );
 
-      return h('div', { className: 'dsh-markdown-editor' }, h('style', { key: 'style' }, CSS), bar, notice, error, input);
+      const surface = h(
+        'div',
+        { className: 'dsh-markdown-editor-surface', key: 'surface' },
+        h(
+          'pre',
+          { className: 'dsh-markdown-editor-highlight', key: 'highlight', ref: highlightRef, 'aria-hidden': 'true' },
+          h('code', null, backdrop),
+        ),
+        h('textarea', {
+          key: 'input',
+          className: 'dsh-markdown-editor-input',
+          ref: bindArea,
+          value: state.draft,
+          wrap: wrap === false ? 'off' : 'soft',
+          spellCheck: false,
+          autoCapitalize: 'off',
+          autoCorrect: 'off',
+          'aria-label': translate('viewer.editor'),
+          onChange: onChange,
+          onKeyDown: onKeyDown,
+          onScroll: onScroll,
+          onCompositionStart: onCompositionStart,
+          onCompositionEnd: onCompositionEnd,
+        }),
+      );
+
+      return h(
+        'div',
+        {
+          className: 'dsh-markdown-editor',
+          'data-wrap': wrap === false ? 'false' : 'true',
+          'data-composing': state.composing ? 'true' : 'false',
+        },
+        h('style', { key: 'style' }, CSS),
+        bar,
+        notice,
+        error,
+        surface,
+      );
     }
 
     return {

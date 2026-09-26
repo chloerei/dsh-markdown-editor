@@ -31,6 +31,31 @@ route answers `409` with the current disk text and the editor offers
 **载入磁盘版本** / **覆盖保存** instead of clobbering another writer's change.
 A leading UTF-8 byte-order mark is preserved across a round trip.
 
+## Syntax highlighting
+
+A backdrop `<pre>` renders the highlighted source under a transparent-text
+`textarea`; the two share padding, font, size, line height, tab size, and
+wrapping mode, and scroll together. The textarea always owns the text, so the
+backdrop never changes what is stored or saved.
+
+- Block constructs: ATX headings, fenced code blocks, thematic breaks, list
+  markers, blockquotes, tables, HTML comments.
+- Inline constructs: code spans, `**strong**`, `*em*`/`_em_` (intraword
+  underscores stay plain), `~~strikethrough~~`, links and images with their
+  target split out, autolinks, escapes.
+- Colors come from the application's own `--shiki-*` sheet, so the editor
+  matches the builtin code preview and follows light/dark themes with no
+  override rules.
+- An IME composition hands the text back to the textarea (the backdrop hides
+  for the duration), so composing Chinese or Japanese stays legible.
+- Above 120k characters the backdrop drops token colors but keeps rendering the
+  text; per-line token results are cached, so typing in a long file only
+  re-tokenizes the changed lines.
+- The editor shows the host's themed scrollbar. Both layers reserve the same
+  gutter (`scrollbar-gutter: stable`, the same 10px `::-webkit-scrollbar`
+  width, `scrollbar-width: thin`), and the backdrop's own thumb is transparent,
+  so exactly one scrollbar is visible and wrap points still line up.
+
 ## Files
 
 | File | Role |
