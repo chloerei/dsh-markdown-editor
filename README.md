@@ -9,7 +9,7 @@ disk.
 
 - A document implementation (`@local/dsh-markdown-editor/editor`) for `md`,
   `markdown`, and `mdx` in the document-preview registry, with
-  `priority: 'extension'` and `loading: 'bytes-complete'`, plus its body in the
+  `priority: 'extension'` and `loading: 'renderer'`, plus its body in the
   keyed `sidebar.right.tab.document` seat.
 - Because an `extension`-band implementation outranks the builtin one, the
   editor is the **default** renderer for those suffixes. The builtin
@@ -17,6 +17,18 @@ disk.
   own viewer dropdown, and the choice is per tab.
 - One authenticated Host route, `POST /api/dsh-markdown-editor/save`, on the
   shared `/api` channel.
+
+## Why the body owns its read
+
+A `renderer` implementation reads its own bytes through the workspace Remote
+instead of letting the preview deliver them. That is deliberate. The preview
+marks a tab stale whenever the watched file's version changes — and saving is
+exactly such a change — then re-reads it. A `bytes-complete` implementation has
+its body **unmounted** while that re-read runs, which flashed the whole editor
+and discarded its focus and caret on every save. Reading the bytes here keeps
+the body mounted across the preview's reload: the same textarea survives, the
+caret stays put, and the incoming bytes are folded into the editor's basis
+instead of replacing it.
 
 ## How saving works
 
@@ -30,6 +42,12 @@ itself is atomic through the backend.
 route answers `409` with the current disk text and the editor offers
 **载入磁盘版本** / **覆盖保存** instead of clobbering another writer's change.
 A leading UTF-8 byte-order mark is preserved across a round trip.
+
+Once a save settles the editor takes focus back with the caret where it was: a
+clicked **保存** or **覆盖保存** is disabled while saving, so the browser would
+otherwise drop focus and the reader would have to click the textarea again to
+keep typing. Focus is left alone when it already sits in the textarea or has
+moved to a control outside the editor.
 
 ## Syntax highlighting
 

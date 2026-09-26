@@ -47,6 +47,7 @@ window.__ModuleLoader__.load({
       'notice.conflict': '文件已被其他写入修改，你的修改尚未保存。',
       'error.noPath': '尚未取得文件的绝对路径，暂时无法保存。',
       'error.decode': '文件不是有效的 UTF-8 文本，无法在这里编辑。',
+      'error.loadFailed': '无法读取文件内容。',
       'error.saveFailed': '保存失败',
       'waiting': '正在读取文件…',
     };
@@ -68,6 +69,7 @@ window.__ModuleLoader__.load({
       'notice.conflict': 'Another write changed this file; your edit was not saved.',
       'error.noPath': 'The file has no absolute path yet, so it cannot be saved.',
       'error.decode': 'This file is not valid UTF-8 text, so it cannot be edited here.',
+      'error.loadFailed': 'The file contents could not be read.',
       'error.saveFailed': 'The file could not be saved.',
       'waiting': 'Reading the file…',
     };
@@ -129,6 +131,17 @@ window.__ModuleLoader__.load({
     let localeService;
     /** Per-line token results keyed by `(in fence, line)`. */
     const lineCache = new Map();
+    /**
+     * Read one file's complete bytes through the workspace Remote. The editor
+     * owns its content loading (a `renderer` implementation), so a save that
+     * changes the file's version re-reads without the preview unmounting the
+     * body. Replaced by `apply` once the Remote face is available.
+     */
+    let readBytes = () =>
+      Promise.resolve({
+        ok: false,
+        error: { code: 'gateway/service-unavailable', message: translate('error.loadFailed') },
+      });
 
     /**
      * Decode complete file bytes as UTF-8.
@@ -158,6 +171,33 @@ window.__ModuleLoader__.load({
       } catch {
         return match[1];
       }
+    }
+
+    /**
+     * Read a session file address into the workspace call it stands for.
+     * @param address - `dsh-resource://file/session/<sessionId>/<path>`.
+     * @returns `{ sessionId, path }`, or undefined for any other address.
+     */
+    function fileOf(address) {
+      const match = /^dsh-resource:\/\/file\/session\/([^/?#]+)\/([^?#]*)/.exec(typeof address === 'string' ? address : '');
+      if (!match) return undefined;
+      let sessionId = match[1];
+      try {
+        sessionId = decodeURIComponent(sessionId);
+      } catch {
+        // Keep the raw segment; the read will reject an unusable id.
+      }
+      const path = match[2]
+        .split('/')
+        .map((segment) => {
+          try {
+            return decodeURIComponent(segment);
+          } catch {
+            return segment;
+          }
+        })
+        .join('/');
+      return { sessionId: sessionId, path: path };
     }
 
     /** Re-render an open editor when the active locale changes. */
@@ -376,45 +416,138 @@ window.__ModuleLoader__.load({
     /* ── The editor body ───────────────────────────────────────────────── */
 
     /**
+     * Return the caret to the editor once a save settles. A clicked Save or
+     * overwrite button is disabled while saving, so the browser drops its
+     * focus; without this the reader would have to click the textarea again to
+     * keep typing. Focus is left alone when it already sits in the textarea or
+     * has moved to a control outside this editor.
+     * @param area - the editor textarea, when it is still mounted.
+     */
+    function refocusEditor(area) {
+      if (!area) return;
+      const doc = area.ownerDocument;
+      const active = doc.activeElement;
+      if (active === area) return;
+      const root = area.closest('.dsh-markdown-editor');
+      if (active !== null && active !== doc.body && (root === null || !root.contains(active))) return;
+      const start = area.selectionStart;
+      const end = area.selectionEnd;
+      area.focus();
+      if (area.selectionStart !== start || area.selectionEnd !== end) {
+        area.selectionStart = start;
+        area.selectionEnd = end;
+      }
+    }
+
+    /**
+     * The editor state for a file whose text is known and unmodified.
+     * @param text - the decoded file text.
+     * @param bom - whether the file carries a byte-order mark.
+     * @returns a clean editor state.
+     */
+    function editorSeed(text, bom) {
+      return {
+        draft: text,
+        saved: text,
+        bom: bom === true,
+        status: 'idle',
+        error: undefined,
+        changed: false,
+        conflict: undefined,
+        composing: false,
+      };
+    }
+
+    /**
+     * Fold one delivered document into the editor's basis. A delivery that
+     * matches the text this editor last wrote is our own save coming back, not
+     * another writer's change, so it never raises the changed notice.
+     * @param prev - current editor state, or undefined before the first decode.
+     * @param decoded - the decoded text and BOM flag from the Host bytes.
+     * @param written - the text this editor last sent to the Host, when any.
+     * @returns the next editor state.
+     */
+    function adoptDecoded(prev, decoded, written) {
+      if (prev === undefined) return editorSeed(decoded.text, decoded.bom);
+      if (decoded.text === prev.saved) {
+        if (!prev.changed && prev.conflict === undefined) return prev;
+        return { ...prev, changed: false, conflict: undefined };
+      }
+      if (prev.draft === prev.saved) return editorSeed(decoded.text, decoded.bom);
+      if (written !== undefined && decoded.text === written) {
+        if (prev.status === 'saving') return prev;
+        return { ...prev, saved: decoded.text, bom: decoded.bom === true, changed: false, conflict: undefined };
+      }
+      return prev.changed ? prev : { ...prev, changed: true };
+    }
+
+    /**
      * One open Markdown file as a highlighted, editable textarea.
      * @param props - owner content plus the standard resource and tab hooks.
      * @returns the editor, or the reason it cannot show one.
      */
     function MarkdownEditorBody(props) {
-      const content = props.content;
       const wrap = props.wrap;
       const scrollportRef = props.scrollportRef;
       const resourceAddress = props.resourceAddress;
+      const request = props.content !== undefined && props.content.kind === 'renderer' ? props.content : undefined;
+      const revision = request !== undefined ? request.revision : undefined;
       const meta = props.useResource(resourceAddress);
       const absolutePath = meta && meta.value ? meta.value.absolutePath : undefined;
       const sessionId = props.sessionId !== undefined ? props.sessionId : sessionIdOf(resourceAddress);
 
       useLocaleRevision();
 
-      const bytes = content && content.kind === 'bytes' ? content.data : undefined;
-      const decodedRef = React.useRef(undefined);
-      if (!decodedRef.current || decodedRef.current.bytes !== bytes) {
-        decodedRef.current = {
-          bytes: bytes,
-          decoded: bytes === undefined ? undefined : decode(bytes),
-        };
-      }
-      const decoded = decodedRef.current.decoded;
-      const initial = decoded && decoded.text !== undefined ? decoded.text : '';
+      const [loaded, setLoaded] = React.useState(undefined);
+      const [loadError, setLoadError] = React.useState(undefined);
 
-      const [state, setState] = React.useState(() => ({
-        draft: initial,
-        saved: initial,
-        bom: decoded ? decoded.bom === true : false,
-        status: 'idle',
-        error: undefined,
-        changed: false,
-        conflict: undefined,
-        composing: false,
-      }));
+      /* Load the file's bytes ourselves. The preview bumps this revision whenever
+         the file's version changes — including our own save — and the body stays
+         mounted throughout, so focus and the caret survive a write. */
+      React.useEffect(() => {
+        if (request === undefined) return undefined;
+        const controller = new AbortController();
+        let live = true;
+        readBytes(fileOf(resourceAddress), controller.signal).then(
+          (result) => {
+            if (!live) return;
+            if (result && result.ok === true) {
+              setLoaded({ data: result.value.data, version: result.value.version });
+              setLoadError(undefined);
+              request.loaded(result.value.version);
+              return;
+            }
+            const error = result && result.error ? result.error : undefined;
+            setLoadError(error && error.message ? error.message : translate('error.loadFailed'));
+            request.failed();
+          },
+          (error) => {
+            if (!live) return;
+            setLoadError(error && error.message ? error.message : String(error));
+            request.failed();
+          },
+        );
+        return () => {
+          live = false;
+          controller.abort();
+        };
+      }, [revision, resourceAddress]);
+
+      const bytes = loaded !== undefined ? loaded.data : undefined;
+      const decodedRef = React.useRef(undefined);
+      if (bytes !== undefined && (!decodedRef.current || decodedRef.current.bytes !== bytes)) {
+        decodedRef.current = { bytes: bytes, decoded: decode(bytes) };
+      }
+      const decoded = decodedRef.current === undefined ? undefined : decodedRef.current.decoded;
+
+      const [state, setState] = React.useState(undefined);
+      if (state === undefined && decoded !== undefined && decoded.text !== undefined) {
+        setState(editorSeed(decoded.text, decoded.bom));
+      }
 
       const areaRef = React.useRef(undefined);
       const highlightRef = React.useRef(undefined);
+      const writeRef = React.useRef(undefined);
       const bindArea = React.useCallback(
         (node) => {
           areaRef.current = node;
@@ -424,32 +557,15 @@ window.__ModuleLoader__.load({
         [scrollportRef],
       );
 
+      const draft = state === undefined ? undefined : state.draft;
       const highlighted = React.useMemo(
-        () => (state.draft.length > HIGHLIGHT_LIMIT ? undefined : highlightLines(state.draft)),
-        [state.draft],
+        () => (draft === undefined || draft.length > HIGHLIGHT_LIMIT ? undefined : highlightLines(draft)),
+        [draft],
       );
 
       React.useEffect(() => {
         if (!decoded || decoded.text === undefined) return;
-        setState((prev) => {
-          if (decoded.text === prev.saved) {
-            if (!prev.changed && prev.conflict === undefined) return prev;
-            return { ...prev, changed: false, conflict: undefined };
-          }
-          if (prev.draft === prev.saved) {
-            return {
-              ...prev,
-              draft: decoded.text,
-              saved: decoded.text,
-              bom: decoded.bom === true,
-              status: 'idle',
-              error: undefined,
-              changed: false,
-              conflict: undefined,
-            };
-          }
-          return prev.changed ? prev : { ...prev, changed: true };
-        });
+        setState((prev) => adoptDecoded(prev, decoded, writeRef.current));
       }, [decoded]);
 
       React.useLayoutEffect(() => {
@@ -472,6 +588,7 @@ window.__ModuleLoader__.load({
           return;
         }
         const sent = current.draft;
+        writeRef.current = sent;
         const payload = { path: absolutePath, text: sent, bom: current.bom === true };
         if (sessionId !== undefined) payload.sessionId = sessionId;
         if (force === true) payload.force = true;
@@ -525,7 +642,8 @@ window.__ModuleLoader__.load({
               status: 'error',
               error: error && error.message ? error.message : String(error),
             }));
-          });
+          })
+          .finally(() => refocusEditor(areaRef.current));
       }
 
       /**
@@ -648,21 +766,26 @@ window.__ModuleLoader__.load({
         setState((prev) => ({ ...prev, composing: false, draft: value }));
       }
 
-      if (!decoded) {
-        return h(
-          'div',
-          { className: 'dsh-markdown-editor' },
-          h('style', { key: 'style' }, CSS),
-          h('p', { className: 'dsh-markdown-editor-note', key: 'note' }, translate('waiting')),
-        );
-      }
-
-      if (decoded.text === undefined) {
+      if (decoded !== undefined && decoded.text === undefined) {
         return h(
           'div',
           { className: 'dsh-markdown-editor' },
           h('style', { key: 'style' }, CSS),
           h('p', { className: 'dsh-markdown-editor-note', key: 'note' }, translate('error.decode')),
+        );
+      }
+
+      if (state === undefined || decoded === undefined) {
+        const failed = loadError !== undefined;
+        return h(
+          'div',
+          { className: 'dsh-markdown-editor' },
+          h('style', { key: 'style' }, CSS),
+          h(
+            'p',
+            { className: failed ? 'dsh-markdown-editor-error' : 'dsh-markdown-editor-note', key: 'note' },
+            failed ? loadError : translate('waiting'),
+          ),
         );
       }
 
@@ -822,6 +945,17 @@ window.__ModuleLoader__.load({
         localeService = ctx.locale;
         translate = ctx.locale.bind(NS);
         ctx.effect(() => ctx.locale.register(NS, { zh: zh, en: en }), 'markdown-editor: locale');
+        // Own the byte read: a `renderer` implementation loads its own content,
+        // so the preview never drops the body while re-reading after a save.
+        ctx.inject(['remote', 'remote.workspaceFiles'], (scope) => {
+          readBytes = (file, signal) =>
+            file === undefined
+              ? Promise.resolve({
+                  ok: false,
+                  error: { code: 'workspace-file/unsupported-address', message: translate('error.loadFailed') },
+                })
+              : scope.remote.workspaceFiles.readBytes(file.sessionId, file.path, {}, signal);
+        });
         ctx.effect(
           () =>
             ctx.documentPreviews.register({
@@ -829,7 +963,7 @@ window.__ModuleLoader__.load({
               extensions: EXTENSIONS,
               priority: 'extension',
               title: () => translate('viewer.editor'),
-              loading: 'bytes-complete',
+              loading: 'renderer',
               wrap: true,
             }),
           'markdown-editor: document implementation',
