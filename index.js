@@ -76,6 +76,24 @@ function stripBom(text) {
 }
 
 /**
+ * Whether a file opens with a UTF-8 byte-order mark. Text reads consume the
+ * mark as an encoding signature, so the file's leading bytes are the only
+ * reliable witness of what is actually on disk.
+ * @param ctx - Host context carrying `fs`.
+ * @param target - the resolved regular file.
+ * @param signal - cancels the byte read.
+ * @returns whether the file starts with `EF BB BF`.
+ */
+async function startsWithBom(ctx, target, signal) {
+  try {
+    const head = await ctx.fs.readByteRange(target, { offset: 0, length: 3 }, signal);
+    return head.length === 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Map one filesystem failure onto the editor's status vocabulary.
  * @param error - the thrown value from `ctx.fs`.
  * @returns the refused response.
@@ -206,7 +224,7 @@ async function handleSave(ctx, request) {
     if (stripBom(current) !== stripBom(baseText)) {
       return failure(409, 'conflict', 'the file changed on disk since it was loaded', {
         current: stripBom(current),
-        bom: hasBom(current),
+        bom: await startsWithBom(ctx, target, request.signal),
       });
     }
   }

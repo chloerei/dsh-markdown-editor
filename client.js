@@ -144,13 +144,17 @@ window.__ModuleLoader__.load({
       });
 
     /**
-     * Decode complete file bytes as UTF-8.
+     * Decode complete file bytes as UTF-8. `ignoreBOM: true` keeps a leading
+     * byte-order mark as the first character so it can be detected and stripped
+     * from the editable text while the draft remembers to write it back; the
+     * default would make the decoder consume the mark silently, and every save
+     * would then drop it from the file.
      * @param bytes - the file's bytes.
      * @returns `{ text, bom }`, or `{ error }` when the bytes are not UTF-8.
      */
     function decode(bytes) {
       try {
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
         const bom = text.charCodeAt(0) === 0xfeff;
         return { text: bom ? text.slice(1) : text, bom: bom };
       } catch (error) {

@@ -41,7 +41,12 @@ itself is atomic through the backend.
 `baseText` is the text the tab loaded. If the file no longer matches it, the
 route answers `409` with the current disk text and the editor offers
 **载入磁盘版本** / **覆盖保存** instead of clobbering another writer's change.
-A leading UTF-8 byte-order mark is preserved across a round trip.
+
+A leading UTF-8 byte-order mark is preserved across a round trip. It is
+invisible, and a text read consumes it as an encoding signature, so both halves
+look at the leading bytes instead: the Client decodes with `ignoreBOM` to tell
+the mark apart from the text, and the Host re-reads the first three bytes when
+it reports a conflict, so an edit never silently strips the mark from the file.
 
 Once a save settles the editor takes focus back with the caret where it was: a
 clicked **保存** or **覆盖保存** is disabled while saving, so the browser would
